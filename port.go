@@ -21,24 +21,61 @@ type internalPort struct {
 }
 
 type portMultiplexer struct {
-	In       chan portMessage
-	Outgoing []listenerPort
-	Internal []*internalPort
+	In                  chan portMessage
+	Outgoing            []listenerPort
+	Internal            []*internalPort
+	PortsBufferLen      int
+	ListeningComponents map[*Component]chan portMessage
+	PauseChan           chan chan struct{}
 }
 
-func portConnector(client, server *portMultiplexer, required, provided Port) {
-	// Connect client -> server
-	client.Outgoing = append(client.Outgoing, listenerPort{required, provided, server})
-	// Also connect server -> client
-	server.Outgoing = append(server.Outgoing, listenerPort{provided, required, client})
-	// TODO: Is connecting a port to itself a problem?
+func newPortMultiplexer(portsBufferLen int, component *Component) *portMultiplexer {
+	pm := &portMultiplexer{
+		In:                  make(chan portMessage, portsBufferLen),
+		Outgoing:            make([]listenerPort, 0),
+		Internal:            make([]*internalPort, 0),
+		PortsBufferLen:      portsBufferLen,
+		ListeningComponents: make(map[*Component]chan portMessage),
+		PauseChan:           make(chan chan struct{}),
+	}
+	pm.ListeningComponents[component] = make(chan portMessage, portsBufferLen)
+	go pm.loop()
+	return pm
 }
 
-func portInternal(client *portMultiplexer, port Port) {
-	client.Internal = append(client.Internal, &internalPort{
-		Port:      port,
-		Listeners: []*portMultiplexer{client},
-	})
+func (pm *portMultiplexer) loop() {
+	for {
+		select {
+		// Pause signals stops the processing of incoming messages
+		case unpause := <-pm.PauseChan:
+			// Wait for the un-pause
+			<-unpause
+		// Send a copy of all incoming messages to listening components (sessions)
+		case portMsg := <-pm.In:
+			for _, lc := range pm.ListeningComponents {
+				lc <- portMsg
+			}
+		}
+	}
+}
+
+func (pm *portMultiplexer) addListeningComponent(original, fork *Component) {
+	unpause := make(chan struct{})
+	// Wait for the loop to stop forwarding messages (will block)
+	pm.PauseChan <- unpause
+	// Add a new channel for the listening fork
+	pm.ListeningComponents[fork] = make(chan portMessage, pm.PortsBufferLen)
+	// Now, make a copy of all messages sent to the original, and send it to both the fork and the original (for later processing)
+	originalChan := pm.ListeningComponents[original]
+	forkChan := pm.ListeningComponents[fork]
+	queued := len(originalChan)
+	for i := 0; i < queued; i++ {
+		portMsg := <-originalChan
+		originalChan <- portMsg
+		forkChan <- portMsg
+	}
+	// Re-start the forwarding
+	unpause <- struct{}{}
 }
 
 func (pm *portMultiplexer) send(port Port, message interface{}) {
@@ -57,11 +94,28 @@ func (pm *portMultiplexer) send(port Port, message interface{}) {
 	}
 }
 
-func (pm *portMultiplexer) receive(timeout *time.Timer) (Port, interface{}) {
+func (pm *portMultiplexer) receive(component *Component, timeout *time.Timer) (Port, interface{}) {
+	componentChan := pm.ListeningComponents[component]
+
 	select {
-	case portMsg := <-pm.In:
+	case portMsg := <-componentChan:
 		return portMsg.Port, portMsg.Message
 	case <-timeout.C:
 		return 0, nil
 	}
+}
+
+func portConnector(client, server *portMultiplexer, required, provided Port) {
+	// Connect client -> server
+	client.Outgoing = append(client.Outgoing, listenerPort{required, provided, server})
+	// Also connect server -> client
+	server.Outgoing = append(server.Outgoing, listenerPort{provided, required, client})
+	// TODO: Is connecting a port to itself a problem?
+}
+
+func portInternal(client *portMultiplexer, port Port) {
+	client.Internal = append(client.Internal, &internalPort{
+		Port:      port,
+		Listeners: []*portMultiplexer{client},
+	})
 }

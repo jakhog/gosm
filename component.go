@@ -5,7 +5,7 @@ import "time"
 const receiveTimeout time.Duration = time.Millisecond * 100
 
 type Component struct {
-	ports       portMultiplexer
+	ports       *portMultiplexer
 	stateCharts []State
 	timer       *time.Timer
 	active      bool
@@ -36,7 +36,7 @@ func (c *Component) loop() {
 		}
 		// Handle incoming messages
 		c.timer.Reset(receiveTimeout)
-		p, m := c.ports.receive(c.timer)
+		p, m := c.ports.receive(c, c.timer)
 		for sc := range c.stateCharts {
 			scHandled, _, _, action := c.stateCharts[sc].Handle(p, m)
 			if scHandled && action != nil {
@@ -58,17 +58,14 @@ func (c *Component) loop() {
 }
 
 func MakeComponent(portsBufferLen int, stateCharts ...State) *Component {
-	return &Component{
-		ports: portMultiplexer{
-			In:       make(chan portMessage, portsBufferLen),
-			Outgoing: make([]listenerPort, 0),
-			Internal: make([]*internalPort, 0),
-		},
+	component := &Component{
 		stateCharts: stateCharts,
 		timer:       time.NewTimer(receiveTimeout),
 		stopped:     false,
 		active:      true,
 	}
+	component.ports = newPortMultiplexer(portsBufferLen, component)
+	return component
 }
 
 func (c *Component) Send(port Port, message interface{}) {
@@ -84,9 +81,9 @@ func (c *Component) Active() bool {
 }
 
 func Connector(client, server *Component, required, provided Port) {
-	portConnector(&client.ports, &server.ports, required, provided)
+	portConnector(client.ports, server.ports, required, provided)
 }
 
 func InternalPort(client *Component, port Port) {
-	portInternal(&client.ports, port)
+	portInternal(client.ports, port)
 }
