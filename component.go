@@ -1,6 +1,8 @@
 package gosm
 
-import "time"
+import (
+	"time"
+)
 
 const receiveTimeout time.Duration = time.Millisecond * 100
 

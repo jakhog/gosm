@@ -1,6 +1,8 @@
 package gosm
 
-import "time"
+import (
+	"time"
+)
 
 type Port uint
 
@@ -96,9 +98,11 @@ func (pm *portMultiplexer) send(port Port, message interface{}) {
 
 func (pm *portMultiplexer) receive(component *Component, timeout *time.Timer) (Port, interface{}) {
 	componentChan := pm.ListeningComponents[component]
-
 	select {
 	case portMsg := <-componentChan:
+		if !timeout.Stop() {
+			<-timeout.C
+		}
 		return portMsg.Port, portMsg.Message
 	case <-timeout.C:
 		return 0, nil
